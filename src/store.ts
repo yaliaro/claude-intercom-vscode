@@ -6,6 +6,7 @@ import {
   mkdirSync,
   writeFileSync,
   existsSync,
+  statSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -16,6 +17,12 @@ const STORE_DIR = join(HOME, ".claude", "mcp-intercom", "store");
 const PRESENCE_DIR = join(STORE_DIR, "presence");
 const MESSAGES_DIR = join(STORE_DIR, "messages");
 const SESSIONS_DIR = join(STORE_DIR, "sessions");
+const PRESENTED_DIR = join(STORE_DIR, "presented");
+
+// Re-show an already-presented message only after this much time without ack/reply.
+// Prevents flood (same message dumped on every Stop hook) while still acting as a
+// reminder if the agent kept ignoring it.
+const PRESENTED_COOLDOWN_MS = 30_000;
 
 export interface PresenceInfo {
   code: string;
@@ -166,6 +173,47 @@ export function findMyCodeSync(): string | null {
   return null;
 }
 
+// --- Presentation tracking (anti-flood) ---
+// A "presented marker" is an empty file at PRESENTED_DIR/{code}/{msg_id}; its
+// mtime is the time the message was last shown. Hooks check this before
+// displaying and skip messages shown within PRESENTED_COOLDOWN_MS. Markers are
+// removed on ack so the next send of the same id (extremely unlikely but safe)
+// would display again.
+
+export function filterUnpresentedSync(
+  code: string,
+  messages: Message[],
+  cooldownMs: number = PRESENTED_COOLDOWN_MS,
+): Message[] {
+  const dir = join(PRESENTED_DIR, code);
+  const now = Date.now();
+  return messages.filter((m) => {
+    try {
+      const st = statSync(join(dir, m.id));
+      return now - st.mtimeMs > cooldownMs;
+    } catch {
+      return true;
+    }
+  });
+}
+
+export function markPresentedSync(code: string, messageIds: string[]): void {
+  const dir = join(PRESENTED_DIR, code);
+  mkdirSync(dir, { recursive: true });
+  const now = new Date();
+  for (const id of messageIds) {
+    const p = join(dir, id);
+    try {
+      writeFileSync(p, "");
+    } catch {}
+    // Force mtime update even if the file already existed (re-show after cooldown)
+    try {
+      const { utimesSync } = require("node:fs");
+      utimesSync(p, now, now);
+    } catch {}
+  }
+}
+
 // --- Sync peek for hook ---
 
 export function peekMessagesSync(code: string): Message[] {
@@ -290,6 +338,11 @@ export async function ackMessage(
   code: string,
   messageId: string,
 ): Promise<boolean> {
+  // Also drop the presented marker so the (vanishingly unlikely) re-use of
+  // the same id wouldn't be silently suppressed.
+  try {
+    await unlink(join(PRESENTED_DIR, code, messageId));
+  } catch {}
   try {
     await unlink(join(MESSAGES_DIR, code, `${messageId}.json`));
     return true;

@@ -1,6 +1,11 @@
 import { watch } from "node:fs";
 import { join } from "node:path";
-import { findMyCodeSync, peekMessagesSync } from "./store.js";
+import {
+  findMyCodeSync,
+  peekMessagesSync,
+  filterUnpresentedSync,
+  markPresentedSync,
+} from "./store.js";
 
 const HOME = process.env.HOME ?? "~";
 const MESSAGES_DIR = join(HOME, ".claude", "mcp-intercom", "store", "messages");
@@ -17,7 +22,8 @@ if (!code) process.exit(0);
 const inbox = join(MESSAGES_DIR, code);
 
 function checkAndNotify(): boolean {
-  const messages = peekMessagesSync(code!);
+  const all = peekMessagesSync(code!);
+  const messages = filterUnpresentedSync(code!, all);
   if (messages.length === 0) return false;
   const lines = messages.map(
     (m) => `  [${m.id}] ${m.from}${m.reply_to ? " (reply)" : ""}: ${m.message}`,
@@ -25,6 +31,7 @@ function checkAndNotify(): boolean {
   console.log(
     `\n📬 INTERCOM [${code}] — ${messages.length} message(s):\n${lines.join("\n")}\n→ Utilise mcp__intercom__reply(message_id, message) pour répondre ou mcp__intercom__ack(message_id) pour accuser réception.\n`,
   );
+  markPresentedSync(code!, messages.map((m) => m.id));
   return true;
 }
 
