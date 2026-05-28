@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 
 const HOME = process.env.HOME ?? "~";
 const STORE_DIR = join(HOME, ".claude", "mcp-intercom", "store");
@@ -41,7 +41,14 @@ async function ensureDirs(): Promise<void> {
 
 export function generateCode(): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  const bytes = randomBytes(4);
+  // Stable per-session: derive a 4-char code deterministically from
+  // CLAUDE_CODE_SESSION_ID. This keeps the same code across MCP server
+  // restarts within one Claude session. Falls back to random for sessions
+  // without a session id (e.g. older terminal setups).
+  const sid = process.env.CLAUDE_CODE_SESSION_ID;
+  const bytes = sid
+    ? createHash("sha256").update(sid).digest().slice(0, 4)
+    : randomBytes(4);
   return Array.from(bytes)
     .map((b) => chars[b % chars.length])
     .join("");
@@ -93,27 +100,59 @@ export function detectProject(): string {
   }
 }
 
-// --- Session management (links PID ancestor chain → agent code) ---
+// --- Session management ---
+// Primary link: CLAUDE_CODE_SESSION_ID — a stable per-session UUID shared by
+// the MCP server and the hooks of the SAME session (the MCP server gets it via
+// an `env` mapping in the MCP config; hooks inherit it from the Claude process).
+// Reliable even when many sessions live under one VS Code extension host.
+// Falls back to PID-ancestry only when no session id is present.
 
-export function registerSessionSync(code: string): number[] {
-  mkdirSync(SESSIONS_DIR, { recursive: true });
-  const pids = getAncestorPids(process.pid);
-  for (const pid of pids) {
-    writeFileSync(join(SESSIONS_DIR, `${pid}.code`), code);
-  }
-  return pids;
+function getSessionId(): string | null {
+  return process.env.CLAUDE_CODE_SESSION_ID || null;
 }
 
-export function unregisterSessionSync(pids: number[]): void {
-  for (const pid of pids) {
+export function registerSessionSync(code: string): string[] {
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  const sid = getSessionId();
+  if (sid) {
+    const key = `sid-${sid}`;
+    writeFileSync(join(SESSIONS_DIR, `${key}.code`), code);
+    return [key];
+  }
+  // Fallback: PID ancestry (no session id available)
+  const keys = getAncestorPids(process.pid).map(String);
+  for (const key of keys) {
+    writeFileSync(join(SESSIONS_DIR, `${key}.code`), code);
+  }
+  return keys;
+}
+
+export function unregisterSessionSync(keys: string[]): void {
+  for (const key of keys) {
     try {
-      unlinkSync(join(SESSIONS_DIR, `${pid}.code`));
+      unlinkSync(join(SESSIONS_DIR, `${key}.code`));
     } catch {}
   }
 }
 
 export function findMyCodeSync(): string | null {
   if (!existsSync(SESSIONS_DIR)) return null;
+
+  // Reliable path: direct session-id lookup.
+  const sid = getSessionId();
+  if (sid) {
+    const file = join(SESSIONS_DIR, `sid-${sid}.code`);
+    if (existsSync(file)) {
+      try {
+        return readFileSync(file, "utf-8").trim();
+      } catch {}
+    }
+    // Registered by session id but file missing — do NOT fall back to PID,
+    // which could return another session's code under a shared parent.
+    return null;
+  }
+
+  // Fallback: PID ancestry.
   let pid = process.ppid;
   for (let depth = 0; depth < 6 && pid > 1; depth++) {
     const file = join(SESSIONS_DIR, `${pid}.code`);

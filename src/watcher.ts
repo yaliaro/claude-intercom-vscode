@@ -42,11 +42,11 @@ try {
     }
   });
 
-  // Safety timeout: 5 minutes max
+  // Safety timeout: 30 minutes max
   setTimeout(() => {
     watcher.close();
     process.exit(0);
-  }, 300_000);
+  }, 1_800_000);
 } catch {
   // Inbox dir doesn't exist yet — fall back to polling
   for (let i = 0; i < 150; i++) {
