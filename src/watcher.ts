@@ -2,6 +2,7 @@ import { watch } from "node:fs";
 import { join } from "node:path";
 import {
   findMyCodeSync,
+  findCodeBySessionIdSync,
   peekMessagesSync,
   filterUnpresentedSync,
   markPresentedSync,
@@ -10,12 +11,37 @@ import {
 const HOME = process.env.HOME ?? "~";
 const MESSAGES_DIR = join(HOME, ".claude", "mcp-intercom", "store", "messages");
 
-// Retry findMyCodeSync — MCP server might not be registered yet (race condition)
+// Claude Code passes hook input as JSON on stdin: { session_id, transcript_path,
+// cwd, hook_event_name, ... }. session_id from stdin is the ONLY reliable way
+// to identify *this* session — env vars are not propagated to hooks and PID
+// ancestry collides under VS Code's shared Extension Host.
+let stdinSessionId: string | null = null;
+try {
+  const input = await Bun.stdin.text();
+  if (input) {
+    const data = JSON.parse(input);
+    if (typeof data.session_id === "string") stdinSessionId = data.session_id;
+  }
+} catch {}
+
 let code: string | null = null;
-for (let attempt = 0; attempt < 15; attempt++) {
-  code = findMyCodeSync();
-  if (code) break;
-  await Bun.sleep(2000);
+if (stdinSessionId) {
+  // Trust stdin: only look up THIS session's code. Do NOT fall back to
+  // PID-ancestry — under shared parents that would return another session's
+  // code and we'd flood the wrong inbox.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    code = findCodeBySessionIdSync(stdinSessionId);
+    if (code) break;
+    await Bun.sleep(500);
+  }
+} else {
+  // No stdin session id (older Claude Code or unusual invocation) — fall back
+  // to the env / PID-ancestry path.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    code = findMyCodeSync();
+    if (code) break;
+    await Bun.sleep(500);
+  }
 }
 if (!code) process.exit(0);
 

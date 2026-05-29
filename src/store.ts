@@ -142,6 +142,19 @@ export function unregisterSessionSync(keys: string[]): void {
   }
 }
 
+// Direct session-id → code lookup. Use this when the caller knows the session
+// id (e.g. read it from the hook's stdin JSON) — it bypasses env/PID guesswork.
+export function findCodeBySessionIdSync(sessionId: string): string | null {
+  if (!sessionId || !existsSync(SESSIONS_DIR)) return null;
+  const file = join(SESSIONS_DIR, `sid-${sessionId}.code`);
+  if (existsSync(file)) {
+    try {
+      return readFileSync(file, "utf-8").trim();
+    } catch {}
+  }
+  return null;
+}
+
 export function findMyCodeSync(): string | null {
   if (!existsSync(SESSIONS_DIR)) return null;
 
