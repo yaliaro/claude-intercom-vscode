@@ -73,17 +73,11 @@ Register the hooks in `~/.claude/settings.json` under `hooks`:
       "asyncRewake": true,
       "timeout": 1800000
     }]
-  }],
-  "SessionStart": [{
-    "hooks": [{
-      "type": "command",
-      "command": "bun /absolute/path/to/.claude/mcp-intercom/src/watcher.ts",
-      "asyncRewake": true,
-      "timeout": 1800000
-    }]
   }]
 }
 ```
+
+> **⚠️ Do NOT register the watcher as a `SessionStart` hook.** It breaks Claude Code's startup with a 60-second subprocess-init timeout — see "Known limitation" below. The `Stop` hook alone is enough to deliver live push.
 
 Restart **all** Claude Code sessions. MCP servers and hooks load only at startup.
 
@@ -132,6 +126,18 @@ If the first command shows `NO_UUID` for some servers, those are transient proce
 - `wrapper.sh` — new file.
 - `README.md` — this file.
 - Everything else (`src/server.ts`, `src/hook.ts`, `skill/`, the MCP tool surface) is unchanged from upstream.
+
+---
+
+## Known limitation: `SessionStart` hook is unsafe
+
+Registering `watcher.ts` as a `SessionStart` hook with `asyncRewake: true` (as the upstream README suggests) makes **brand-new** Claude Code sessions fail to start, with a 60-second `Subprocess initialization did not complete` timeout.
+
+The mechanism: when a brand-new session boots, the parent claude process does not yet have `--resume <uuid>` in its command line, so `wrapper.sh` cannot recover the session id. Meanwhile, the watcher's internal `findMyCodeSync` retry loop (up to ~30 seconds waiting for the MCP server to register the session-id → code mapping) blocks the session startup before `asyncRewake` can take over. Net effect: the session hangs and Claude Code aborts.
+
+The `Stop` hook does NOT have this problem because it runs after a turn (the session is already up by then, the MCP server has registered, and the session id is available).
+
+**Recommendation:** wire `watcher.ts` only as a `Stop` hook (+ `hook.ts` as a `PreToolUse` hook). The trade-off is that a message arriving **before** you interact with a freshly-opened session is shown on the first turn boundary or the first tool call instead of instantly — a few seconds of delay, not a lost message. Live push during an actual conversation is unaffected.
 
 ---
 
